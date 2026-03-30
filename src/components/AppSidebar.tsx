@@ -39,7 +39,7 @@ export const AppSidebar = memo(function AppSidebar({
     <Sidebar>
       <SidebarHeader className="p-4">
         <div className="flex items-center justify-between">
-          <span className="text-lg font-semibold text-foreground">OpenChat</span>
+          <span className="text-lg font-semibold text-foreground">Echo</span>
           <SidebarTrigger />
         </div>
         <Button onClick={onNewChat} className="w-full mt-2 gap-2">

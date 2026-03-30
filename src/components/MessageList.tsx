@@ -93,7 +93,10 @@ const MessageBubble = memo(function MessageBubble({
 
 // ─── Virtuoso custom components ───────────────────────────────────────────────
 
-const virtuosoComponents: Components<Message> = {
+type SpacerItem = { role: "spacer" };
+type ListItem = Message | SpacerItem;
+
+const virtuosoComponents: Components<ListItem> = {
   // Centers and constrains the list width, matching the old max-w-4xl container
   List: forwardRef(function List({ children, style, ...props }, ref) {
     return (
@@ -140,6 +143,7 @@ export const MessageList = memo(function MessageList({
   const scrollerRef = useRef<HTMLElement | null>(null);
   const lastScrollTop = useRef(0);
   const isAtBottomRef = useRef(true);
+  const [scrollerHeight, setScrollerHeight] = useState(600);
 
   // Reset edit state when switching chats
   useEffect(() => {
@@ -147,19 +151,20 @@ export const MessageList = memo(function MessageList({
     setEditText("");
   }, [activeChatId]);
 
-  // When a user message is added, snap that item to the top so the assistant
-  // response has room to appear below it.
+  // When a user message is added, snap it to the top of the viewport.
+  // Uses "auto" (instant) to avoid conflicting with any in-flight smooth scrolls.
+  // The spacer item in listItems gives Virtuoso enough room to honour align:"start".
   const messageCount = messages.length;
   useEffect(() => {
     if (messages[messages.length - 1]?.role !== "user") return;
-    const id = setTimeout(() => {
+    const raf = requestAnimationFrame(() => {
       virtuosoRef.current?.scrollToIndex({
         index: messages.length - 1,
         align: "start",
-        behavior: "smooth",
+        behavior: "auto",
       });
-    }, 50);
-    return () => clearTimeout(id);
+    });
+    return () => cancelAnimationFrame(raf);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messageCount]);
 
@@ -179,6 +184,7 @@ export const MessageList = memo(function MessageList({
   const setScrollerRef = useCallback((ref: HTMLElement | Window | null) => {
     if (!(ref instanceof HTMLElement)) return;
     scrollerRef.current = ref;
+    setScrollerHeight(ref.clientHeight);
     ref.addEventListener(
       "scroll",
       () => {
@@ -221,42 +227,55 @@ export const MessageList = memo(function MessageList({
     setEditText(value);
   }, []);
 
+  // The spacer lives in Virtuoso's data for the entire loading duration so that:
+  // 1. scrollToIndex("start") has room to pin the user message to the top.
+  // 2. Removing the spacer only when loading ends (not on first chunk) prevents
+  //    a viewport jump mid-stream when isThinking would have toggled.
+  const lastMsg = messages[messages.length - 1];
+  const isThinking = loading && (lastMsg?.role !== "assistant" || lastMsg?.content === "");
+  const listItems: ListItem[] = loading
+    ? [...messages, { role: "spacer" }]
+    : messages;
+
   // Not memoized — Virtuoso needs a fresh reference each render so it
   // re-calls itemContent for visible items when message content changes
   // (e.g. each SSE chunk). MessageBubble's memo still prevents unnecessary
   // DOM updates for messages whose content hasn't changed.
-  const renderItem = (index: number, msg: Message) => (
-    <MessageBubble
-      msg={msg}
-      index={index}
-      isEditing={editingIndex === index}
-      editText={editText}
-      onEditTextChange={handleEditTextChange}
-      onEditStart={handleEditStart}
-      onEditSave={handleEditSave}
-      onEditCancel={handleEditCancel}
-    />
-  );
-
-  const renderFooter = () =>
-    loading && messages[messages.length - 1]?.role !== "assistant" ? (
-      <div className="w-full max-w-4xl mx-auto pt-3 px-4">
-        <p className="text-sm text-muted-foreground animate-pulse">Thinking…</p>
-      </div>
-    ) : null;
+  const renderItem = (index: number, item: ListItem) => {
+    if (item.role === "spacer") {
+      return (
+        <div style={{ height: scrollerHeight }}>
+          {isThinking && (
+            <p className="text-sm text-muted-foreground animate-pulse px-4 pt-3">Thinking…</p>
+          )}
+        </div>
+      );
+    }
+    return (
+      <MessageBubble
+        msg={item}
+        index={index}
+        isEditing={editingIndex === index}
+        editText={editText}
+        onEditTextChange={handleEditTextChange}
+        onEditStart={handleEditStart}
+        onEditSave={handleEditSave}
+        onEditCancel={handleEditCancel}
+      />
+    );
+  };
 
   return (
     <>
       <Virtuoso
         ref={virtuosoRef}
         className="flex-1 px-4 overflow-x-hidden"
-        data={messages}
+        data={listItems}
         scrollerRef={setScrollerRef}
         itemContent={renderItem}
-        components={{ ...virtuosoComponents, Footer: renderFooter }}
+        components={virtuosoComponents}
         initialTopMostItemIndex={messages.length - 1}
         alignToBottom
-        followOutput={(isAtBottom) => (isAtBottom ? "smooth" : false)}
         overscan={1000}
         atBottomStateChange={(atBottom) => {
           isAtBottomRef.current = atBottom;
