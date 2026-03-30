@@ -53,7 +53,7 @@ export default function Home() {
           className="scroll-m-20 text-4xl font-extrabold tracking-tight text-center py-6 flex items-center justify-center gap-3 shrink-0"
         >
           <SidebarTrigger className="-ml-1" />
-          OpenChat
+          Echo
         </Animated>
 
         <MessageList
