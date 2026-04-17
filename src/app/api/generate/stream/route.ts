@@ -1,5 +1,8 @@
 import { cookies } from "next/headers";
-import { validatePrompt } from "@/lib/sanitize";
+import { validateMessages } from "@/lib/sanitize";
+
+// Maps frontend role strings to Go proto enum values (chat/v1/chat.proto)
+const ROLE_MAP = { user: 1, assistant: 2 } as const;
 
 export async function POST(request: Request) {
   const cookieStore = await cookies();
@@ -12,13 +15,14 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    const validation = validatePrompt(body?.prompt);
+    const validation = validateMessages(body?.messages);
     if (!validation.ok) {
       return Response.json({ error: validation.error }, { status: 400 });
     }
 
-    // Replace the raw prompt with the sanitized version before forwarding.
-    const sanitizedBody = { ...body, prompt: validation.value };
+    const sanitizedBody = {
+      messages: validation.value.map((m) => ({ role: ROLE_MAP[m.role], content: m.content })),
+    };
 
     const backendRes = await fetch("http://localhost:8080/generate/stream", {
       method: "POST",
