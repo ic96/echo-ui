@@ -21,7 +21,11 @@ type UseChatOptions = {
   dispatch: Dispatch<SessionAction>;
 };
 
-export function useChat({ sessionId, activeMessages, dispatch }: UseChatOptions) {
+export function useChat({
+  sessionId,
+  activeMessages,
+  dispatch,
+}: UseChatOptions) {
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -35,17 +39,21 @@ export function useChat({ sessionId, activeMessages, dispatch }: UseChatOptions)
   // been added via appendAssistant. Returns true on clean [DONE], false on
   // a dropped connection (triggering a retry from the caller).
   const streamFromApi = useCallback(
-    async (prompt: string, signal: AbortSignal): Promise<boolean> => {
+    async (messages: Message[], signal: AbortSignal): Promise<boolean> => {
       const res = await fetch("/api/generate/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ messages }),
         signal,
       });
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        dispatch({ type: "setLastError", sessionId, error: data.error ?? "Request failed" });
+        dispatch({
+          type: "setLastError",
+          sessionId,
+          error: data.error ?? "Request failed",
+        });
         return true; // non-retriable HTTP error
       }
 
@@ -84,13 +92,22 @@ export function useChat({ sessionId, activeMessages, dispatch }: UseChatOptions)
               if (parsed.error) {
                 // Backend signaled an error — show immediately, no retry.
                 pendingChunk = "";
-                dispatch({ type: "setLastError", sessionId, error: parsed.error });
+                dispatch({
+                  type: "setLastError",
+                  sessionId,
+                  error: parsed.error,
+                });
                 return true;
               }
             } catch {}
           }
         }
       } finally {
+        // Release the reader's lock on res.body so the stream can be garbage
+        // collected. A ReadableStream can only have one active reader at a time —
+        // without this, the lock persists even after abort, preventing the browser
+        // from cleaning up the underlying resource.
+        reader.releaseLock();
         clearInterval(flushInterval);
         if (pendingChunk) {
           dispatch({ type: "appendChunk", sessionId, chunk: pendingChunk });
@@ -106,20 +123,22 @@ export function useChat({ sessionId, activeMessages, dispatch }: UseChatOptions)
   // Adds the empty assistant message once, then retries streamFromApi up to
   // MAX_RETRIES times on dropped connections or network errors.
   const runWithRetry = useCallback(
-    async (prompt: string, signal: AbortSignal) => {
+    async (messages: Message[], signal: AbortSignal) => {
       dispatch({ type: "appendAssistant", sessionId });
 
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         if (attempt > 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, retryDelay(attempt - 1)));
+          await new Promise<void>((resolve) =>
+            setTimeout(resolve, retryDelay(attempt - 1)),
+          );
           if (signal.aborted) return;
           dispatch({ type: "resetLastAssistant", sessionId });
         }
 
         try {
-          const success = await streamFromApi(prompt, signal);
+          const success = await streamFromApi(messages, signal);
           if (success || signal.aborted) return;
-          // success===false: dropped connection, loop continues to retry
+          // success === false: dropped connection, loop continues to retry
         } catch (err) {
           if (err instanceof Error && err.name === "AbortError") return;
           if (attempt === MAX_RETRIES) throw err;
@@ -139,24 +158,30 @@ export function useChat({ sessionId, activeMessages, dispatch }: UseChatOptions)
   const sendMessage = useCallback(
     async (prompt: string) => {
       const sanitized = sanitizeInput(prompt);
-      if (!sanitized.trim() || loading || sanitized.length > MAX_PROMPT_LENGTH) return;
+      if (!sanitized.trim() || loading || sanitized.length > MAX_PROMPT_LENGTH)
+        return;
       prompt = sanitized;
 
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
 
+      const newMessage: Message = { role: "user", content: prompt };
       const isFirst = activeMessages.length === 0;
       dispatch({
         type: "sendMessage",
         sessionId,
-        message: { role: "user", content: prompt },
+        message: newMessage,
         newTitle: isFirst ? prompt.slice(0, 40) : undefined,
       });
       setLoading(true);
 
+      // Build history locally — React state update from dispatch above is async
+      // so activeMessages doesn't yet include the new message.
+      const history = [...activeMessages, newMessage];
+
       try {
-        await runWithRetry(prompt, controller.signal);
+        await runWithRetry(history, controller.signal);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") return;
         dispatch({
@@ -184,16 +209,20 @@ export function useChat({ sessionId, activeMessages, dispatch }: UseChatOptions)
       const controller = new AbortController();
       abortRef.current = controller;
 
+      const editedMessage: Message = { role: "user", content: newContent };
       dispatch({
         type: "editAndResend",
         sessionId,
         index,
-        message: { role: "user", content: newContent },
+        message: editedMessage,
       });
       setLoading(true);
 
+      // Reconstruct the history up to and including the edited message.
+      const history = [...activeMessages.slice(0, index), editedMessage];
+
       try {
-        await runWithRetry(newContent, controller.signal);
+        await runWithRetry(history, controller.signal);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") return;
         dispatch({
