@@ -67,3 +67,34 @@ export function validatePrompt(raw: unknown): ValidationResult {
 
   return { ok: true, value };
 }
+
+export type SanitizedMessage = { role: "user" | "assistant"; content: string };
+
+export type MessagesValidationResult =
+  | { ok: true; value: SanitizedMessage[] }
+  | { ok: false; error: string };
+
+/**
+ * Validates and sanitizes an array of chat messages.
+ */
+export function validateMessages(raw: unknown): MessagesValidationResult {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: "Messages must be a non-empty array." };
+  }
+
+  const sanitized: SanitizedMessage[] = [];
+  for (const m of raw) {
+    if (typeof m !== "object" || m === null) {
+      return { ok: false, error: "Invalid message format." };
+    }
+    if (m.role !== "user" && m.role !== "assistant") {
+      return { ok: false, error: `Invalid role: ${m.role}` };
+    }
+    if (typeof m.content !== "string") {
+      return { ok: false, error: "Message content must be a string." };
+    }
+    sanitized.push({ role: m.role, content: sanitizeInput(m.content) });
+  }
+
+  return { ok: true, value: sanitized };
+}
