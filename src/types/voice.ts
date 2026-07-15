@@ -31,9 +31,6 @@ export type SpotifyItem = {
   externalUrl: string;
 };
 
-// followers/popularity/genres are stripped from the API response entirely
-// (Spotify's Feb 2026 Dev Mode restrictions) — null/empty means "not
-// provided", not "zero".
 export type SpotifyArtist = {
   id: string;
   name: string;

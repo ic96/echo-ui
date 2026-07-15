@@ -3,7 +3,6 @@ import {
   useState,
   useCallback,
   useRef,
-  useEffect,
   useLayoutEffect,
   memo,
   forwardRef,
@@ -166,104 +165,62 @@ export const MessageList = memo(function MessageList({
 }: MessageListProps) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
-  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [atBottom, setAtBottom] = useState(true);
+  const [hasNewBelow, setHasNewBelow] = useState(false);
 
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const scrollerRef = useRef<HTMLElement | null>(null);
-  const lastScrollTop = useRef(0);
-  const isAtBottomRef = useRef(true);
-  // Whether to keep following the reply as it streams. Re-armed on send,
-  // cleared if the user scrolls away.
-  const autoFollowRef = useRef(true);
-  // Whether history already fills/overflows the viewport, as of the last
-  // scroll/layout measurement (tracked continuously, since by send time the
-  // DOM already includes the new message).
-  const historyFillsViewportRef = useRef(false);
   const [scrollerHeight, setScrollerHeight] = useState(600);
   const streamingItemRef = useRef<HTMLDivElement | null>(null);
   const [streamingHeight, setStreamingHeight] = useState(0);
 
-  // Reset edit state when switching chats
-  useEffect(() => {
+  // Reset edit state when switching chats — adjusted during render (React's
+  // recommended pattern for resetting state on a prop change) rather than in
+  // an effect, which would cause an extra render/paint of stale edit state.
+  const [prevActiveChatId, setPrevActiveChatId] = useState(activeChatId);
+  if (activeChatId !== prevActiveChatId) {
+    setPrevActiveChatId(activeChatId);
     setEditingIndex(null);
     setEditText("");
-  }, [activeChatId]);
+  }
 
-  // On send, scroll down to reveal the new message. Short history: target
-  // the spacer, pinning the message near the top with room for the reply.
-  // Full/overflowing history: target the message itself for a slight nudge
-  // instead of a jarring jump. Smooth so it scrolls rather than cuts away.
-  const messageCount = messages.length;
-  useEffect(() => {
-    if (messages[messages.length - 1]?.role !== "user") return;
-    autoFollowRef.current = true;
-    const historyFillsViewport = historyFillsViewportRef.current;
-    const raf = requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollToIndex({
-        index: historyFillsViewport || !loading ? messageCount - 1 : messageCount,
-        align: "end",
-        behavior: "smooth",
-      });
-    });
-    return () => cancelAnimationFrame(raf);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageCount, loading]);
+  // Decides whether Virtuoso should auto-scroll when the item list grows —
+  // covers both a new message being appended and an existing item (the
+  // streaming reply) growing taller, since Virtuoso's own "not at bottom
+  // because size increased" tracking triggers this too, not just new items.
+  // If the user isn't at the bottom, don't yank them — just flag it.
+  const followOutput = useCallback((isAtBottom: boolean) => {
+    if (isAtBottom) return "smooth";
+    setHasNewBelow(true);
+    return false;
+  }, []);
 
-  // Keeps the growing reply's bottom in view while streaming. Targets the
-  // message directly, not scrollHeight, since that includes the spacer.
   const lastContent = messages[messages.length - 1]?.content;
-  useEffect(() => {
-    if (!loading || !autoFollowRef.current || !lastContent) return;
-    const raf = requestAnimationFrame(() => {
-      virtuosoRef.current?.scrollToIndex({
-        index: messageCount - 1,
-        align: "end",
-        behavior: "auto",
-      });
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [lastContent, loading, messageCount]);
-
   // Re-measure the streaming reply after each chunk so the spacer below it
   // can shrink to match, keeping the two at roughly one viewport height.
+  // Genuinely needs an effect: offsetHeight only exists after DOM layout.
   useLayoutEffect(() => {
     if (!loading) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStreamingHeight(0);
       return;
     }
     setStreamingHeight(streamingItemRef.current?.offsetHeight ?? 0);
   }, [lastContent, loading]);
 
-  // Hides the scroll button while scrolling down; atBottomStateChange
-  // handles showing/hiding it at the bottom.
   const setScrollerRef = useCallback((ref: HTMLElement | Window | null) => {
     if (!(ref instanceof HTMLElement)) return;
     scrollerRef.current = ref;
     setScrollerHeight(ref.clientHeight);
-    historyFillsViewportRef.current = ref.scrollHeight > ref.clientHeight;
-    ref.addEventListener(
-      "scroll",
-      () => {
-        const el = scrollerRef.current;
-        if (!el) return;
-        const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-        const scrollingDown = el.scrollTop > lastScrollTop.current;
-        lastScrollTop.current = el.scrollTop;
-        const scrolledAway = !scrollingDown && distFromBottom > 100;
-        setShowScrollButton(scrolledAway);
-        if (scrolledAway) autoFollowRef.current = false;
-        historyFillsViewportRef.current = el.scrollHeight > el.clientHeight;
-      },
-      { passive: true },
-    );
   }, []);
 
   const scrollToBottom = useCallback(() => {
-    scrollerRef.current?.scrollTo({
-      top: scrollerRef.current.scrollHeight,
+    virtuosoRef.current?.scrollToIndex({
+      index: messages.length - 1,
       behavior: "smooth",
     });
-  }, []);
+    setHasNewBelow(false);
+  }, [messages.length]);
 
   const handleEditStart = useCallback((index: number, content: string) => {
     setEditingIndex(index);
@@ -339,21 +296,17 @@ export const MessageList = memo(function MessageList({
         components={virtuosoComponents}
         initialTopMostItemIndex={messages.length - 1}
         alignToBottom
-        overscan={1000}
-        atBottomStateChange={(atBottom) => {
-          isAtBottomRef.current = atBottom;
-          if (atBottom) {
-            setShowScrollButton(false);
-            autoFollowRef.current = true;
-          }
-          const el = scrollerRef.current;
-          if (el) historyFillsViewportRef.current = el.scrollHeight > el.clientHeight;
+        increaseViewportBy={{ top: 200, bottom: 200 }}
+        followOutput={followOutput}
+        atBottomStateChange={(isAtBottom) => {
+          setAtBottom(isAtBottom);
+          if (isAtBottom) setHasNewBelow(false);
         }}
       />
 
       {/* Scroll to bottom button */}
       <AnimatePresence>
-        {showScrollButton && (
+        {!atBottom && hasNewBelow && (
           <motion.button
             key="scroll-btn"
             initial={{ opacity: 0, y: 8 }}

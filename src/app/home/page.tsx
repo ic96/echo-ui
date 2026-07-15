@@ -1,5 +1,5 @@
 "use client";
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Animated } from "@/components/Animated";
 import { AppSidebar } from "@/components/AppSidebar";
 import { ChatBar } from "@/components/ChatBar";
@@ -35,6 +35,18 @@ export default function Home() {
     dispatch,
   });
 
+  // True when a voice-dictated message went to general chat, so the reply
+  // gets spoken back once streaming finishes.
+  const pendingSpokenReplyRef = useRef(false);
+
+  const handleVoiceGeneralChat = useCallback(
+    (text: string) => {
+      pendingSpokenReplyRef.current = true;
+      sendMessage(text);
+    },
+    [sendMessage],
+  );
+
   const {
     isRecording,
     isBusy: isVoiceBusy,
@@ -42,16 +54,27 @@ export default function Home() {
     startRecording,
     stopRecording,
     searchText,
+    speak,
   } = useVoiceSearch({
     sessionId: activeChatId,
     activeMessages: messages,
     dispatch,
     searchType,
+    onGeneralChat: handleVoiceGeneralChat,
   });
 
-  // Recommendations/Related Artists are dead for new Spotify apps, so "more
-  // like this" is a DIY substitute: search Spotify for other tracks by the
-  // same artist instead of a real recommendation engine.
+  // Speaks the reply once streaming ends, but only for voice-dictated turns.
+  useEffect(() => {
+    if (loading || !pendingSpokenReplyRef.current) return;
+    pendingSpokenReplyRef.current = false;
+    const last = messages[messages.length - 1];
+    if (last?.role === "assistant" && last.content) {
+      void speak(last.content);
+    }
+  }, [loading, messages, speak]);
+
+  // DIY "more like this" (Recommendations API is dead): search other tracks
+  // by the same artist.
   const handleFindSimilar = useCallback(
     async (track: SpotifyTrack) => {
       const res = await fetch(
@@ -96,8 +119,7 @@ export default function Home() {
     }
   }, [isRecording, isVoiceBusy, loading, startRecording, stopRecording]);
 
-  // Cmd+K (or Ctrl+K) toggles voice search from anywhere on the page —
-  // starts recording, and pressing it again stops it, same as the mic button.
+  // Cmd/Ctrl+K toggles voice search, same as the mic button.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {

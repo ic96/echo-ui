@@ -1,6 +1,4 @@
-// Simple keyword heuristic for routing typed chat input: if it looks like a
-// song/artist/album/etc. search, send it to Spotify search instead of the
-// general AI chat backend.
+// Keyword heuristic: route to Spotify search instead of general chat.
 const SPOTIFY_KEYWORDS = [
   "play ",
   "spotify",
@@ -19,8 +17,8 @@ const SPOTIFY_KEYWORDS = [
   "episode",
   "audiobook",
   "listen to",
-  "find me",
-  "search for",
+  "find",
+  "search",
   "who sings",
 ];
 

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useRef, useState } from "react";
 import type { Dispatch } from "react";
+import { isSpotifyQuery } from "@/lib/spotifyIntent";
 import type { Message, SessionAction } from "@/types/chat";
 import type { SpotifyItem, SpotifySearchType, SpotifyTrack, VoiceError } from "@/types/voice";
 
@@ -14,13 +15,20 @@ type UseVoiceSearchOptions = {
   activeMessages: Message[];
   dispatch: Dispatch<SessionAction>;
   searchType: SpotifySearchType;
+  // Called when a transcript isn't a Spotify query — routes to general chat.
+  onGeneralChat: (text: string) => void;
 };
 
-// Drops a query's result straight into the chat session: the query lands as
-// a user message, the Spotify match(es) as an assistant message carrying
-// track/result cards. Shared by voice (after transcription) and typed input
-// (searchText, below) — the only difference is voice also speaks the result.
-export function useVoiceSearch({ sessionId, activeMessages, dispatch, searchType }: UseVoiceSearchOptions) {
+// Transcribes speech via ElevenLabs, then routes it like typed input
+// (lib/spotifyIntent): Spotify queries search + speak the result; anything
+// else goes to onGeneralChat.
+export function useVoiceSearch({
+  sessionId,
+  activeMessages,
+  dispatch,
+  searchType,
+  onGeneralChat,
+}: UseVoiceSearchOptions) {
   const [isRecording, setIsRecording] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<VoiceError | null>(null);
@@ -29,8 +37,28 @@ export function useVoiceSearch({ sessionId, activeMessages, dispatch, searchType
   const chunksRef = useRef<Blob[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  const speak = useCallback(async (text: string) => {
+    try {
+      const speakRes = await fetch("/api/voice/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (speakRes.ok) {
+        const audioBlob = await speakRes.blob();
+        const url = URL.createObjectURL(audioBlob);
+        const audio = new Audio(url);
+        audioRef.current = audio;
+        audio.addEventListener("ended", () => URL.revokeObjectURL(url), { once: true });
+        await audio.play().catch(() => {});
+      }
+    } catch {
+      // TTS failure shouldn't block what's already in the chat.
+    }
+  }, []);
+
   const runSearchPipeline = useCallback(
-    async (text: string, speak: boolean) => {
+    async (text: string, shouldSpeak: boolean) => {
       setIsBusy(true);
       try {
         const isFirst = activeMessages.length === 0;
@@ -77,32 +105,14 @@ export function useVoiceSearch({ sessionId, activeMessages, dispatch, searchType
           dispatch({ type: "appendSearchResults", sessionId, content: confirmation, results: items });
         }
 
-        if (!speak) return;
-        try {
-          const speakRes = await fetch("/api/voice/speak", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: confirmation }),
-          });
-          if (speakRes.ok) {
-            const audioBlob = await speakRes.blob();
-            const url = URL.createObjectURL(audioBlob);
-            const audio = new Audio(url);
-            audioRef.current = audio;
-            audio.addEventListener("ended", () => URL.revokeObjectURL(url), { once: true });
-            await audio.play().catch(() => {});
-          }
-        } catch {
-          // Spoken confirmation is a nice-to-have — a TTS failure shouldn't
-          // hide the track result that was already dispatched.
-        }
+        if (shouldSpeak) await speak(confirmation);
       } catch (err) {
         setError({ type: "api", message: err instanceof Error ? err.message : "Something went wrong" });
       } finally {
         setIsBusy(false);
       }
     },
-    [dispatch, sessionId, activeMessages, searchType],
+    [dispatch, sessionId, activeMessages, searchType, speak],
   );
 
   const searchText = useCallback(
@@ -136,13 +146,18 @@ export function useVoiceSearch({ sessionId, activeMessages, dispatch, searchType
           return;
         }
 
-        await runSearchPipeline(text, true);
+        if (isSpotifyQuery(text)) {
+          await runSearchPipeline(text, true);
+        } else {
+          setIsBusy(false);
+          onGeneralChat(text);
+        }
       } catch (err) {
         setError({ type: "api", message: err instanceof Error ? err.message : "Something went wrong" });
         setIsBusy(false);
       }
     },
-    [runSearchPipeline],
+    [runSearchPipeline, onGeneralChat],
   );
 
   const startRecording = useCallback(async () => {
@@ -184,5 +199,5 @@ export function useVoiceSearch({ sessionId, activeMessages, dispatch, searchType
     setIsRecording(false);
   }, []);
 
-  return { isRecording, isBusy, error, startRecording, stopRecording, searchText };
+  return { isRecording, isBusy, error, startRecording, stopRecording, searchText, speak };
 }
