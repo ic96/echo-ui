@@ -7,6 +7,7 @@ const cspHeader = [
   "img-src 'self' data: blob:",
   "font-src 'self'",
   "connect-src 'self'",
+  "frame-src https://open.spotify.com",
   "frame-ancestors 'none'",
   "object-src 'none'",
   "base-uri 'self'",

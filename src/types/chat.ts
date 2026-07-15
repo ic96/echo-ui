@@ -1,6 +1,10 @@
+import type { SpotifyItem, SpotifyTrack } from "@/types/voice";
+
 export type Message = {
   role: "user" | "assistant";
   content: string;
+  tracks?: SpotifyTrack[];
+  results?: SpotifyItem[];
 };
 
 export type ChatSession = {
@@ -22,4 +26,6 @@ export type SessionAction =
   | { type: "resetLastAssistant"; sessionId: string }
   | { type: "appendChunk"; sessionId: string; chunk: string }
   | { type: "setLastError"; sessionId: string; error: string }
-  | { type: "appendError"; sessionId: string; error: string };
+  | { type: "appendError"; sessionId: string; error: string }
+  | { type: "appendTrackResult"; sessionId: string; content: string; tracks: SpotifyTrack[] }
+  | { type: "appendSearchResults"; sessionId: string; content: string; results: SpotifyItem[] };

@@ -4,6 +4,7 @@ import {
   useCallback,
   useRef,
   useEffect,
+  useLayoutEffect,
   memo,
   forwardRef,
 } from "react";
@@ -12,12 +13,14 @@ import { ChevronDown, Pencil } from "lucide-react";
 import { Virtuoso, type Components, type VirtuosoHandle } from "react-virtuoso";
 import { Animated } from "@/components/Animated";
 import { Button } from "@/components/ui/Button";
+import { TrackCard } from "@/components/TrackCard";
+import { SpotifyResultCard } from "@/components/SpotifyResultCard";
 import { Textarea } from "@/components/ui/Textarea";
 import type { Message } from "@/types/chat";
+import type { SpotifyTrack } from "@/types/voice";
 
 // ─── MessageBubble ────────────────────────────────────────────────────────────
-// Memoized so it only re-renders when its own msg content changes.
-// During SSE streaming only the last assistant bubble re-renders.
+// Memoized: only re-renders when its own msg content changes.
 
 type MessageBubbleProps = {
   msg: Message;
@@ -28,6 +31,7 @@ type MessageBubbleProps = {
   onEditStart: (index: number, content: string) => void;
   onEditSave: () => void;
   onEditCancel: () => void;
+  onFindSimilar: (track: SpotifyTrack) => void;
 };
 
 const MessageBubble = memo(function MessageBubble({
@@ -39,6 +43,7 @@ const MessageBubble = memo(function MessageBubble({
   onEditStart,
   onEditSave,
   onEditCancel,
+  onFindSimilar,
 }: MessageBubbleProps) {
   return (
     <Animated
@@ -80,6 +85,28 @@ const MessageBubble = memo(function MessageBubble({
           </button>
           <div className="rounded-xl px-4 py-2 text-sm leading-7 whitespace-pre-wrap bg-primary text-primary-foreground min-w-0">
             {msg.content}
+          </div>
+        </div>
+      ) : msg.tracks && msg.tracks.length > 0 ? (
+        <div className="flex flex-col gap-1.5 w-full min-w-0">
+          <p className="text-sm leading-7 whitespace-pre-wrap text-foreground max-w-[90%]">
+            {msg.content}
+          </p>
+          <div className="flex items-start gap-4 overflow-x-auto pr-4 pb-1">
+            {msg.tracks.map((track) => (
+              <TrackCard key={track.id} track={track} onFindSimilar={onFindSimilar} />
+            ))}
+          </div>
+        </div>
+      ) : msg.results && msg.results.length > 0 ? (
+        <div className="flex flex-col gap-1.5 w-full min-w-0">
+          <p className="text-sm leading-7 whitespace-pre-wrap text-foreground max-w-[90%]">
+            {msg.content}
+          </p>
+          <div className="flex items-start gap-4 overflow-x-auto pr-4 pb-1">
+            {msg.results.map((item) => (
+              <SpotifyResultCard key={item.id} item={item} />
+            ))}
           </div>
         </div>
       ) : (
@@ -127,6 +154,7 @@ type MessageListProps = {
   activeChatId: string;
   loading: boolean;
   onEditAndResend: (index: number, newContent: string) => void;
+  onFindSimilar: (track: SpotifyTrack) => void;
 };
 
 export const MessageList = memo(function MessageList({
@@ -134,6 +162,7 @@ export const MessageList = memo(function MessageList({
   activeChatId,
   loading,
   onEditAndResend,
+  onFindSimilar,
 }: MessageListProps) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState("");
@@ -143,7 +172,16 @@ export const MessageList = memo(function MessageList({
   const scrollerRef = useRef<HTMLElement | null>(null);
   const lastScrollTop = useRef(0);
   const isAtBottomRef = useRef(true);
+  // Whether to keep following the reply as it streams. Re-armed on send,
+  // cleared if the user scrolls away.
+  const autoFollowRef = useRef(true);
+  // Whether history already fills/overflows the viewport, as of the last
+  // scroll/layout measurement (tracked continuously, since by send time the
+  // DOM already includes the new message).
+  const historyFillsViewportRef = useRef(false);
   const [scrollerHeight, setScrollerHeight] = useState(600);
+  const streamingItemRef = useRef<HTMLDivElement | null>(null);
+  const [streamingHeight, setStreamingHeight] = useState(0);
 
   // Reset edit state when switching chats
   useEffect(() => {
@@ -151,40 +189,58 @@ export const MessageList = memo(function MessageList({
     setEditText("");
   }, [activeChatId]);
 
-  // When a user message is added, snap it to the top of the viewport.
-  // Uses "auto" (instant) to avoid conflicting with any in-flight smooth scrolls.
-  // The spacer item in listItems gives Virtuoso enough room to honour align:"start".
+  // On send, scroll down to reveal the new message. Short history: target
+  // the spacer, pinning the message near the top with room for the reply.
+  // Full/overflowing history: target the message itself for a slight nudge
+  // instead of a jarring jump. Smooth so it scrolls rather than cuts away.
   const messageCount = messages.length;
   useEffect(() => {
     if (messages[messages.length - 1]?.role !== "user") return;
+    autoFollowRef.current = true;
+    const historyFillsViewport = historyFillsViewportRef.current;
     const raf = requestAnimationFrame(() => {
       virtuosoRef.current?.scrollToIndex({
-        index: messages.length - 1,
-        align: "start",
-        behavior: "auto",
+        index: historyFillsViewport || !loading ? messageCount - 1 : messageCount,
+        align: "end",
+        behavior: "smooth",
       });
     });
     return () => cancelAnimationFrame(raf);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageCount]);
+  }, [messageCount, loading]);
 
-  // followOutput handles new-item scroll, but doesn't fire when an existing
-  // item grows (streaming). This effect covers that case.
+  // Keeps the growing reply's bottom in view while streaming. Targets the
+  // message directly, not scrollHeight, since that includes the spacer.
   const lastContent = messages[messages.length - 1]?.content;
   useEffect(() => {
-    if (!loading || !isAtBottomRef.current) return;
+    if (!loading || !autoFollowRef.current || !lastContent) return;
     const raf = requestAnimationFrame(() => {
-      scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
+      virtuosoRef.current?.scrollToIndex({
+        index: messageCount - 1,
+        align: "end",
+        behavior: "auto",
+      });
     });
     return () => cancelAnimationFrame(raf);
+  }, [lastContent, loading, messageCount]);
+
+  // Re-measure the streaming reply after each chunk so the spacer below it
+  // can shrink to match, keeping the two at roughly one viewport height.
+  useLayoutEffect(() => {
+    if (!loading) {
+      setStreamingHeight(0);
+      return;
+    }
+    setStreamingHeight(streamingItemRef.current?.offsetHeight ?? 0);
   }, [lastContent, loading]);
 
-  // Track scroll direction to hide the button while scrolling down.
-  // atBottomStateChange on Virtuoso handles showing/hiding at the bottom.
+  // Hides the scroll button while scrolling down; atBottomStateChange
+  // handles showing/hiding it at the bottom.
   const setScrollerRef = useCallback((ref: HTMLElement | Window | null) => {
     if (!(ref instanceof HTMLElement)) return;
     scrollerRef.current = ref;
     setScrollerHeight(ref.clientHeight);
+    historyFillsViewportRef.current = ref.scrollHeight > ref.clientHeight;
     ref.addEventListener(
       "scroll",
       () => {
@@ -193,7 +249,10 @@ export const MessageList = memo(function MessageList({
         const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
         const scrollingDown = el.scrollTop > lastScrollTop.current;
         lastScrollTop.current = el.scrollTop;
-        setShowScrollButton(!scrollingDown && distFromBottom > 100);
+        const scrolledAway = !scrollingDown && distFromBottom > 100;
+        setShowScrollButton(scrolledAway);
+        if (scrolledAway) autoFollowRef.current = false;
+        historyFillsViewportRef.current = el.scrollHeight > el.clientHeight;
       },
       { passive: true },
     );
@@ -227,31 +286,28 @@ export const MessageList = memo(function MessageList({
     setEditText(value);
   }, []);
 
-  // The spacer lives in Virtuoso's data for the entire loading duration so that:
-  // 1. scrollToIndex("start") has room to pin the user message to the top.
-  // 2. Removing the spacer only when loading ends (not on first chunk) prevents
-  //    a viewport jump mid-stream when isThinking would have toggled.
+  // Spacer stays until loading ends (not just first chunk) to avoid a
+  // viewport jump when isThinking toggles off. Shrinks as the reply grows.
   const lastMsg = messages[messages.length - 1];
   const isThinking = loading && (lastMsg?.role !== "assistant" || lastMsg?.content === "");
   const listItems: ListItem[] = loading
     ? [...messages, { role: "spacer" }]
     : messages;
+  const spacerHeight = Math.max(0, scrollerHeight - streamingHeight);
 
-  // Not memoized — Virtuoso needs a fresh reference each render so it
-  // re-calls itemContent for visible items when message content changes
-  // (e.g. each SSE chunk). MessageBubble's memo still prevents unnecessary
-  // DOM updates for messages whose content hasn't changed.
+  // Not memoized so Virtuoso re-calls itemContent on content changes;
+  // MessageBubble's own memo still skips unchanged DOM updates.
   const renderItem = (index: number, item: ListItem) => {
     if (item.role === "spacer") {
       return (
-        <div style={{ height: scrollerHeight }}>
+        <div style={{ height: spacerHeight }}>
           {isThinking && (
             <p className="text-sm text-muted-foreground animate-pulse px-4 pt-3">Thinking…</p>
           )}
         </div>
       );
     }
-    return (
+    const bubble = (
       <MessageBubble
         msg={item}
         index={index}
@@ -261,7 +317,14 @@ export const MessageList = memo(function MessageList({
         onEditStart={handleEditStart}
         onEditSave={handleEditSave}
         onEditCancel={handleEditCancel}
+        onFindSimilar={onFindSimilar}
       />
+    );
+    // Wrap only the streaming reply so its height can be measured.
+    return loading && index === messages.length - 1 ? (
+      <div ref={streamingItemRef}>{bubble}</div>
+    ) : (
+      bubble
     );
   };
 
@@ -269,7 +332,7 @@ export const MessageList = memo(function MessageList({
     <>
       <Virtuoso
         ref={virtuosoRef}
-        className="flex-1 px-4 overflow-x-hidden"
+        className="chat-scroll flex-1 px-4 overflow-x-hidden"
         data={listItems}
         scrollerRef={setScrollerRef}
         itemContent={renderItem}
@@ -279,7 +342,12 @@ export const MessageList = memo(function MessageList({
         overscan={1000}
         atBottomStateChange={(atBottom) => {
           isAtBottomRef.current = atBottom;
-          if (atBottom) setShowScrollButton(false);
+          if (atBottom) {
+            setShowScrollButton(false);
+            autoFollowRef.current = true;
+          }
+          const el = scrollerRef.current;
+          if (el) historyFillsViewportRef.current = el.scrollHeight > el.clientHeight;
         }}
       />
 

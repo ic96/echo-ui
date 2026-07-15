@@ -113,6 +113,38 @@ function sessionsReducer(state: State, action: SessionAction): State {
         ),
       };
 
+    case "appendTrackResult":
+      return {
+        ...state,
+        sessions: state.sessions.map((s) =>
+          s.id === action.sessionId
+            ? {
+                ...s,
+                messages: [
+                  ...s.messages,
+                  { role: "assistant", content: action.content, tracks: action.tracks },
+                ],
+              }
+            : s,
+        ),
+      };
+
+    case "appendSearchResults":
+      return {
+        ...state,
+        sessions: state.sessions.map((s) =>
+          s.id === action.sessionId
+            ? {
+                ...s,
+                messages: [
+                  ...s.messages,
+                  { role: "assistant", content: action.content, results: action.results },
+                ],
+              }
+            : s,
+        ),
+      };
+
     default:
       return state;
   }
